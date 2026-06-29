@@ -33,7 +33,6 @@ class LimitofQuantification(StreamMetric):
             value=np.array(data).mean(),
         )
 
-
 class SampleEntropy(StreamMetric):
     def aggregate(self, datapoint, reference=None, metric_config=None):
         metric_config = metric_config or {}
@@ -64,7 +63,6 @@ class SampleEntropy(StreamMetric):
             value=np.array(data).mean(),
         )
 
-
 class SNR(StreamMetric):
     def aggregate(self, datapoint, reference=None, metric_config=None):
         if reference is None:
@@ -83,7 +81,6 @@ class SNR(StreamMetric):
             value=np.array(data).mean(),
         )
 
-
 class MetadataCompleteness(TabularMetric):
     def compute(self, data, reference=None, metric_config=None):
         # count missing values in relation to all cells in the DataFrame
@@ -98,7 +95,7 @@ class MetadataCompleteness(TabularMetric):
             threshold=1.0,
         )
 
-class ImageEntropy(StreamMetric):
+class ImageEntropy3D(StreamMetric):
     """
     Computes Entropy of a CT Scan image (NIFTI format).
     """
@@ -126,7 +123,7 @@ class ImageEntropy(StreamMetric):
         else :
             bins = int(metric_config["bins"])
         
-        arr = (datapoint[0][0]).numpy()
+        arr = datapoint[0]
         
         norm_arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-8)
         hist, _ = np.histogram(norm_arr.flatten(), bins=bins, density=False)
@@ -139,7 +136,7 @@ class ImageEntropy(StreamMetric):
             cluster=None,
             threshold=0,
             description="Image entropy from a CT Scan image (NIFTI format)",
-            value=data,
+            value=np.array(data).mean(),
         )
         return res
 
@@ -183,7 +180,7 @@ class MeanGradientMagnitudeScale(StreamMetric):
         else :
             sigmas = int(metric_config["sigmas"])
         
-        arr = (datapoint[0][0]).numpy()
+        arr = datapoint[0]
         image_sitk = sitk.GetImageFromArray(arr)
         grads = []
         for s in sigmas:
@@ -202,7 +199,8 @@ class MeanGradientMagnitudeScale(StreamMetric):
         )
         return res
     
-class _TaskTransferFunction_tools(StreamMetric):
+
+class _TaskTransferFunction_tools():
     """
     Toolkit for TaskTranferFunction classes
     """
@@ -325,7 +323,7 @@ class _TaskTransferFunction_tools(StreamMetric):
         ttf_computed_val = interp_x(ttf_value)
         return ttf_computed_val
 
-class TaskTransferFunction50(_TaskTransferFunction_tools):
+class TaskTransferFunction50(_TaskTransferFunction_tools, StreamMetric):
     """
     Computes Task Transfer Function 50 of a CT Scan image (NIFTI format).
     
@@ -337,6 +335,96 @@ class TaskTransferFunction50(_TaskTransferFunction_tools):
             Reflects effective spatial resolution (image sharpness).
             Low values : < 0.15
             High values : > 0.25
+
+    Higher values indicate better resolution performance, while lower values
+    suggest increased blurring or smoothing.
+
+    These metrics should be interpreted alongside noise measurements (e.g., NoisePowerSpectrum)
+    to assess overall image quality.
+    """
+    def compute_ttf_3d_fast(
+        self,
+        volume,
+        max_profiles=1000,
+        profile_half_length=10,
+        sampling_step=3,
+    ):
+        return super().compute_ttf_3d_fast(volume,
+            max_profiles,
+            profile_half_length,
+            sampling_step,
+        )
+    
+    def compute_ttf_metrics_interp(self, ttf, freqs, ttf_value):
+        return super().compute_ttf_metrics_interp(ttf, freqs, ttf_value)
+    
+    
+    def aggregate(self, datapoint, reference=None, metric_config=None):
+        """
+        Requieres : 
+        - base image in a tensor (datapoint[0])
+        Optional :
+        In a dictionary "metric_config" :
+        - int max_profiles
+        - int profile_half_length
+        - int sampling_step
+        
+        Raises :
+            ValueError : if "datapoint[0]" is not a torch.tensor
+        Args:
+            datapoint : 
+                datapoint[0] : torch.tensor([img]) ; 
+            reference : None.
+            metric_config (example): {'max_profiles' : 1000, 'profile_half_length':10, 'sampling_step':3}
+        """
+        if not torch.is_tensor(datapoint[0]):
+            raise ValueError("Data must be structured in a torch.tensor.")
+        
+        if metric_config is None or metric_config["max_profiles"] is None:
+            max_profiles = 1000
+        else :
+            max_profiles = int(metric_config["max_profiles"])
+            
+        if metric_config is None or metric_config["profile_half_length"] is None:
+            profile_half_length = 10
+        else :
+            profile_half_length = int(metric_config["profile_half_length"])
+            
+        if metric_config is None or metric_config["sampling_step"] is None:
+            sampling_step = 3
+        else :
+            sampling_step = int(metric_config["sampling_step"])
+              
+        arr = datapoint[0]
+        
+        ttf, freqs = self.compute_ttf_3d_fast(arr, max_profiles=max_profiles,
+                                         profile_half_length=profile_half_length,
+                                         sampling_step=sampling_step)
+        ttf50 = self.compute_ttf_metrics_interp(ttf, freqs,0.5)
+        return ttf50
+
+
+    def compute(self, data, reference, metric_config):
+        res = MetricResult(
+            cluster=None,
+            threshold=0.15,
+            description="Task Transfer Function 50 from a CT Scan image (NIFTI format)",
+            value=np.array(data).mean(),
+        )
+        return res
+
+class TaskTransferFunction10(_TaskTransferFunction_tools, StreamMetric):
+    """
+    Computes Task Transfer Function 10 of a CT Scan image (NIFTI format).
+    
+    TTF50 and TTF10 are scalar metrics derived from the Task Transfer Function (TTF),
+    which describes how well an imaging system preserves contrast at different
+    spatial frequencies.
+
+    - TTF10: Frequency at which the TTF falls to 10% of its maximum.
+            Reflects limiting resolution (visibility of fine details).
+            Low values : < 0.08
+            High values : > 0.15
 
     Higher values indicate better resolution performance, while lower values
     suggest increased blurring or smoothing.
@@ -397,102 +485,7 @@ class TaskTransferFunction50(_TaskTransferFunction_tools):
         else :
             sampling_step = int(metric_config["sampling_step"])
             
-        # arr = (datapoint[0][0]).numpy()
         arr = datapoint[0]
-        
-        ttf, freqs = self.compute_ttf_3d_fast(arr, max_profiles=max_profiles,
-                                         profile_half_length=profile_half_length,
-                                         sampling_step=sampling_step)
-        ttf50 = self.compute_ttf_metrics_interp(ttf, freqs,0.5)
-        return ttf50
-
-
-    def compute(self, data, reference, metric_config):
-        res = MetricResult(
-            cluster=None,
-            threshold=0,
-            description="Task Transfer Function 50 from a CT Scan image (NIFTI format)",
-            value=data,
-        )
-        return res
-
-class TaskTransferFunction10(_TaskTransferFunction_tools):
-    """
-    Computes Task Transfer Function 10 of a CT Scan image (NIFTI format).
-    
-    TTF50 and TTF10 are scalar metrics derived from the Task Transfer Function (TTF),
-    which describes how well an imaging system preserves contrast at different
-    spatial frequencies.
-
-    - TTF10: Frequency at which the TTF falls to 10% of its maximum.
-            Reflects limiting resolution (visibility of fine details).
-            Low values : < 0.08
-            High values : > 0.15
-
-    Higher values indicate better resolution performance, while lower values
-    suggest increased blurring or smoothing.
-
-    These metrics should be interpreted alongside noise measurements (e.g., NPS)
-    to assess overall image quality.
-    """
-    def compute_ttf_3d_fast(
-        self,
-        volume,
-        max_profiles=1000,
-        profile_half_length=10,
-        sampling_step=3,
-    ):
-        return super().compute_ttf_3d_fast(volume,
-            max_profiles,
-            profile_half_length,
-            sampling_step,
-        )
-    
-    def compute_ttf_metrics_interp(self, ttf, freqs, ttf_value):
-        return super().compute_ttf_metrics_interp(ttf, freqs, ttf_value)
-    
-    
-    def aggregate(self, datapoint, reference=None, metric_config=None):
-        """
-        Requieres : 
-        - base image in a tensor (datapoint[1])
-        Optional :
-        In a dictionary "metric_config" :
-        - int max_profiles
-        - int profile_half_length
-        - int sampling_step
-        
-        Raises :
-            ValueError : if "datapoint[1]" is not a torch.tensor
-        Args:
-            datapoint : 
-                datapoint[1] : torch.tensor([img]) ; 
-            reference : None.
-            metric_config (example): {'max_profiles' : 1000, 'profile_half_length':10, 'sampling_step':3}
-        """
-        if not torch.is_tensor(datapoint[1]):
-            raise ValueError("Data must be structured in a torch.tensor.")
-        
-        if metric_config is None or metric_config["max_profiles"] is None:
-            max_profiles = 1000
-        else :
-            max_profiles = int(metric_config["max_profiles"])
-            
-        if metric_config is None or metric_config["profile_half_length"] is None:
-            profile_half_length = 10
-        else :
-            profile_half_length = int(metric_config["profile_half_length"])
-            
-        if metric_config is None or metric_config["sampling_step"] is None:
-            sampling_step = 3
-        else :
-            sampling_step = int(metric_config["sampling_step"])
-            
-        
-        arr = datapoint[0]
-        
-        # arr = (datapoint[0][0]).numpy()
-        
         
         ttf, freqs = self.compute_ttf_3d_fast(arr, max_profiles=max_profiles,
                                          profile_half_length=profile_half_length,
@@ -503,29 +496,117 @@ class TaskTransferFunction10(_TaskTransferFunction_tools):
 
     def compute(self, data, reference, metric_config):
         res = MetricResult(
-            cluster=None,
-            threshold=0,
+            cluster="Measurement Process",
+            threshold=0.08,
             description="Task Transfer Function 10 from a CT SCan image (NIFTI format)",
             value=data,
         )
         return res
     
-class NoisePowerSpectrum(StreamMetric):
+class _NoisePowerSpectrum3D_tools():
+    
+    def _get_nps_2d(self, arr, patch_size, stride, keep_fraction, apply_window):
+        H, W = arr.shape
+
+        patches = []
+        scores = []
+
+        # --- Hanning Window
+        if apply_window:
+            win = np.hanning(patch_size)
+            window = np.outer(win, win)
+        else:
+            window = np.ones((patch_size, patch_size))
+
+        # --- 1. Extract patches
+        for i in range(0, H - patch_size +1 , stride):
+            for j in range(0, W - patch_size +1, stride):
+
+                patch = arr[i:i+patch_size, j:j+patch_size]
+                
+                gx, gy = np.gradient(patch)
+                grad = np.sqrt(gx**2 + gy**2)
+                score = np.mean(grad)
+
+                patches.append(patch)
+                scores.append(score)
+
+        patches = np.array(patches)
+        scores = np.array(scores)
+
+        if len(patches) == 0:
+            raise ValueError("No patch extracted.")
+        
+
+        # --- 2. Select best patches
+        N_keep = max(10, int(len(patches) * keep_fraction))
+        idx = np.argsort(scores)[:N_keep]
+        selected_patches = patches[idx]
+    
+        # --- 3. Compute NPS
+        nps_list = []
+
+        for patch in selected_patches:
+            patch = patch - np.mean(patch)
+            patch = patch * window
+
+            fft = np.fft.fftshift(np.fft.fft2(patch))
+            
+            norm_factor = np.sum(window**2)
+            nps = (np.abs(fft) ** 2) / norm_factor
+
+            nps_list.append(nps)
+
+        nps_2d_mean = np.mean(nps_list, axis=0)
+        
+        return nps_2d_mean
+        
+    def get_nps_1d_freq(self, arr, patch_size, stride, keep_fraction, apply_window):
+
+        if arr.ndim == 3:
+            slices_tmp = arr
+        else:
+            slices_tmp = arr[None, ...]
+            
+        
+        slice_indices = np.linspace(0, slices_tmp.shape[0]-1, 10, dtype=int)
+        slices = slices_tmp[slice_indices]
+
+        nps_list_all = []
+
+        for slice_2d in slices:
+            nps_2d_mean = self._get_nps_2d(slice_2d, patch_size, stride, keep_fraction, apply_window)
+            nps_list_all.append(nps_2d_mean)
+
+        nps_2d_mean = np.mean(nps_list_all, axis=0)
+
+        # --- 4. Radial averaging
+        y, x = np.indices(nps_2d_mean.shape)
+        center = np.array(nps_2d_mean.shape) // 2
+        r = np.sqrt((x - center[1])**2 + (y - center[0])**2)
+        r = r.astype(np.int32)
+
+        tbin = np.bincount(r.ravel(), nps_2d_mean.ravel())
+        nr = np.bincount(r.ravel())
+
+        nps_1d = tbin / np.maximum(nr, 1)
+        freqs = np.arange(len(nps_1d)) / patch_size
+        
+        return nps_1d, freqs
+
+class TotalPower_NoisePowerSpectrum3D(StreamMetric, _NoisePowerSpectrum3D_tools):
     """
-    Computes Noise Power Spectrum of a CT Scan image (NIFTI format).
+    Computes Total power of Noise Power Spectrum of a CT Scan image (NIFTI format).
     
     The NPS describes how noise is distributed across spatial frequencies,
     providing both the magnitude and texture of noise.
 
     Key outputs:
-        - NPS(f): frequency-dependent noise power
-        - total_power: overall noise level (proportional to noise variance)
+        - total_power: overall noise level (proportional to noise variance), describes the quantity of noise 
 
     Interpretation:
-        - Higher total_power → more noise
+        - Higher total_power → high noise
         - Lower total_power → cleaner image
-        - Low-frequency NPS → smooth noise
-        - High-frequency NPS → fine, grainy noise
 
     The NPS is a standard metric in CT image quality assessment and should
     be interpreted together with resolution metrics (e.g., TTF).
@@ -537,6 +618,9 @@ class NoisePowerSpectrum(StreamMetric):
         apply_window = True
         
     """
+    
+    def get_nps_1d_freq(self, arr, patch_size, stride, keep_fraction, apply_window):
+        return super().get_nps_1d_freq(arr, patch_size, stride, keep_fraction, apply_window)
 
     def aggregate(self, datapoint, reference=None, metric_config=None):
         """
@@ -583,115 +667,140 @@ class NoisePowerSpectrum(StreamMetric):
             
         
         arr = datapoint[0]
-        # arr = (datapoint[0][0]).numpy()
-        arr = np.asarray(arr, dtype=np.float32)
         
-        if arr.ndim == 3:
-            arr = arr[arr.shape[0] // 2]
-
-        H, W = arr.shape
-
-        patches = []
-        scores = []
-
-        # --- Hanning Window
-        if apply_window:
-            win = np.hanning(patch_size)
-            window = np.outer(win, win)
-        else:
-            window = np.ones((patch_size, patch_size))
-
-        # --- 1. Extract patches
-        for i in range(0, H - patch_size, stride):
-            for j in range(0, W - patch_size, stride):
-
-                patch = arr[i:i+patch_size, j:j+patch_size]
-
-                gx, gy = np.gradient(patch)
-                grad = np.sqrt(gx**2 + gy**2)
-
-                score = np.mean(grad) + 0.5 * np.var(patch)
-
-                patches.append(patch)
-                scores.append(score)
-
-        patches = np.array(patches)
-        scores = np.array(scores)
-
-        if len(patches) == 0:
-            raise ValueError("No patch extracted.")
-        
-
-        # --- 2. Select best patches
-        N_keep = max(10, int(len(patches) * keep_fraction))
-        idx = np.argsort(scores)[:N_keep]
-        selected_patches = patches[idx]
-    
-        # --- 3. Compute NPS
-        nps_list = []
-
-        for patch in selected_patches:
-            patch = patch - np.mean(patch)
-            patch = patch * window
-
-            fft = np.fft.fftshift(np.fft.fft2(patch))
-            nps = (np.abs(fft) ** 2) / (patch_size ** 2)
-
-            nps_list.append(nps)
-
-        nps_2d_mean = np.mean(nps_list, axis=0)
-
-        # --- 4. Radial averaging
-        y, x = np.indices(nps_2d_mean.shape)
-        center = np.array(nps_2d_mean.shape) // 2
-        r = np.sqrt((x - center[1])**2 + (y - center[0])**2)
-        r = r.astype(np.int32)
-
-        tbin = np.bincount(r.ravel(), nps_2d_mean.ravel())
-        nr = np.bincount(r.ravel())
-
-        nps_1d = tbin / np.maximum(nr, 1)
-        freqs = np.arange(len(nps_1d)) / patch_size
+        nps_1d, freqs = self.get_nps_1d_freq(arr, patch_size, stride, keep_fraction, apply_window)
 
         # --- Metrics
         total_power = float(np.sum(nps_1d))
 
-        # Mean frequency (center of mass of spectrum)
-        mean_freq = float(np.sum(freqs * nps_1d) / np.sum(nps_1d))
+        ### Possibility to add more metrics : 
+        # # Mean frequency (center of mass of spectrum)
+        # mean_freq = float(np.sum(freqs * nps_1d) / np.sum(nps_1d))
 
-        # Peak frequency
-        peak_freq = float(freqs[np.argmax(nps_1d)])
+        # # Peak frequency
+        # peak_freq = float(freqs[np.argmax(nps_1d)])
 
-        # --- Classification (simple rule)
-        # empirical value
-        if mean_freq < 0.15:
-            noise_type = "low_frequency"   # smoothed noise / IR
-        else:
-            noise_type = "high_frequency"  # grainy noise / FBP
+        # # --- Classification (simple rule)
+        # # empirical value
+        # if mean_freq < 0.15:
+        #     noise_type = "low_frequency"   # smoothed noise / IR
+        # else:
+        #     noise_type = "high_frequency"  # grainy noise / FBP
 
-        metrics = {
-            "num_total_patches": len(patches),
-            "num_selected_patches": len(selected_patches),
-            "total_power": total_power,
-            "mean_frequency": mean_freq,
-            "peak_frequency": peak_freq,
-            "noise_type": noise_type,
-            "mean_score_selected": float(np.mean(scores[idx])),
-        }
+        # metrics = {
+        #     "num_total_patches": len(patches),
+        #     "num_selected_patches": len(selected_patches),
+        #     "total_power": total_power,
+        #     "mean_frequency": mean_freq,
+        #     "peak_frequency": peak_freq,
+        #     "noise_type": noise_type,
+        #     "mean_score_selected": float(np.mean(scores[idx])),
+        # }
 
-        return nps_1d, freqs, metrics
+        return total_power
 
 
     def compute(self, data, reference, metric_config):
         res = MetricResult(
-            cluster=None,
+            cluster="Measurement Process",
             threshold=0,
-            description="Noise Power Spectrum from a CT Scan image (NIFTI format)",
+            description="Total Power Noise Power Spectrum from a CT Scan image (NIFTI format)",
             value=data,
         )
         return res
     
+class Entropy_NoisePowerSpectrum3D(StreamMetric, _NoisePowerSpectrum3D_tools):
+    """
+    Computes the entropy of Noise Power Spectrum of a CT Scan image (NIFTI format).
+    
+    The NPS describes how noise is distributed across spatial frequencies,
+    providing both the magnitude and texture of noise.
 
+    Key outputs:
+        - NPS entropy: entropy of noise power spectrum, describes the distribution of noise 
+
+    Interpretation:
+        - High NPS entropy → noise spread in a lot of frequences
+        - Low NPS entropy → noise concentrated in few frequences
+
+    The NPS is a standard metric in CT image quality assessment and should
+    be interpreted together with resolution metrics (e.g., TTF).
+    
+    By default : 
+        patch_size = 32
+        stride = 16
+        keep_fraction = 0.1
+        apply_window = True
+        
+    """
+    
+    def get_nps_1d_freq(self, arr, patch_size, stride, keep_fraction, apply_window):
+        return super().get_nps_1d_freq(arr, patch_size, stride, keep_fraction, apply_window)
+
+    def aggregate(self, datapoint, reference=None, metric_config=None):
+        """
+        Requieres : 
+        - base image in a tensor (datapoint[0])
+        Optional :
+        In a dictionary "metric_config" :
+        - int patch_size
+        - int stride
+        - float keep_fraction
+        - bool apply_window
+        
+        Raises :
+            ValueError : if "datapoint[0]" is not a torch.tensor
+        Args:
+            datapoint : 
+                datapoint[0] : torch.tensor([array_img]) ; 
+            reference : None.
+            metric_config (example): {'patch_size' : 32, 'stride':16, 'keep_fraction':0.1, 'apply_window':True }
+            
+        """
+        if not torch.is_tensor(datapoint[0]):
+            raise ValueError("Data must be structured in a torch.tensor.")
+        
+        if metric_config is None or metric_config["patch_size"] is None:
+            patch_size = 32
+        else :
+            patch_size = int(metric_config["patch_size"])
+            
+        if metric_config is None or metric_config["stride"] is None:
+            stride = 16
+        else :
+            stride = int(metric_config["stride"])
+            
+        if metric_config is None or metric_config["keep_fraction"] is None:
+            keep_fraction = 0.1
+        else :
+            keep_fraction = float(metric_config["keep_fraction"])
+            
+        if metric_config is None or metric_config["apply_window"] is None:
+            apply_window = True
+        else :
+            apply_window = bool(metric_config["apply_window"])
+            
+        
+        arr = datapoint[0]
+
+        nps_1d, freqs = self.get_nps_1d_freq(arr, patch_size, stride, keep_fraction, apply_window)
+        
+        p = nps_1d / np.sum(nps_1d)
+        p = p[p > 0]
+
+        entropy_nps = -np.sum(p * np.log2(p))
+
+        return entropy_nps
+
+
+    def compute(self, data, reference, metric_config):
+        res = MetricResult(
+            cluster="Measurement Process",
+            threshold=0,
+            description="Noise Power Spectrum Entropy from a CT Scan image (NIFTI format)",
+            value=data,
+        )
+        return res
 class DICESimilarityCoefficient(StreamMetric):
     """
     Computes de DSC between two segmentations.
@@ -732,6 +841,7 @@ class DICESimilarityCoefficient(StreamMetric):
         overlap = sitk.LabelOverlapMeasuresImageFilter()
         
         seg1_img = sitk.GetImageFromArray(datapoint[1][0])
+        
         # rebuild segmentation specifications
         seg1_img.SetOrigin(ast.literal_eval(datapoint[2][str(metric_config["seg1_origin"])])) # origin
         seg1_img.SetSpacing(ast.literal_eval(datapoint[2][str(metric_config["seg1_spacing"])])) # spacing
@@ -750,8 +860,8 @@ class DICESimilarityCoefficient(StreamMetric):
     def compute(self, data, reference, metric_config):
         res = MetricResult(
             cluster="Measurement Process",
-            threshold=0,
-            description="DICE Score between two segmentations",
+            threshold=0.9,
+            description="DICE",
             value=data,
         )
         return res
@@ -813,14 +923,14 @@ class IntersectionOverUnion(StreamMetric):
 
     def compute(self, data, reference, metric_config):
         res = MetricResult(
-            cluster=None,
-            threshold=0,
+            cluster="Measurement Process",
+            threshold=0.85,
             description="Intersection over Union Score between two segmentations",
             value=data,
         )
         return res
 
-class _HausdorffDistance_tools(StreamMetric):
+class _HausdorffDistance_tools():
     """
     Toolkit for HausdorffDistance classes
     """
@@ -883,8 +993,7 @@ class _HausdorffDistance_tools(StreamMetric):
 
         return dists_seg2_to_seg1, dists_seg1_to_seg2
 
-
-class HausdorffDistance(_HausdorffDistance_tools):
+class HausdorffDistance(_HausdorffDistance_tools,StreamMetric):
     """
     Computes Hausdorff Distance (in mm) between two segmentations.
     Needs to have two segmentation files in NIFTI format.
@@ -993,14 +1102,14 @@ class HausdorffDistance(_HausdorffDistance_tools):
 
     def compute(self, data, reference, metric_config):
         res = MetricResult(
-            cluster=None,
-            threshold=0,
+            cluster="Measurement Process",
+            threshold=5,
             description="maximum Hausdorff Distance between two segmentations",
             value=data,
         )
         return res
     
-class HausdorffDistance95(_HausdorffDistance_tools):
+class HausdorffDistance95(_HausdorffDistance_tools, StreamMetric):
     """
     Computes Hausdorff Distance 95 (in mm) between two segmentations.
     Needs to have two segmentation files in NIFTI format.
@@ -1113,8 +1222,8 @@ class HausdorffDistance95(_HausdorffDistance_tools):
 
     def compute(self, data, reference, metric_config):
         res = MetricResult(
-            cluster=None,
-            threshold=0,
+            cluster="Measurement Process",
+            threshold=1,
             description="Hausdorff Distance 95% \between two segmentations",
             value=data,
         )
