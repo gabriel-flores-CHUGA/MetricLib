@@ -5,6 +5,7 @@ import SimpleITK as sitk
 from scipy.ndimage import binary_erosion
 from scipy.ndimage import uniform_filter
 from scipy.spatial import cKDTree
+from scipy.ndimage import map_coordinates
 from ..metric import MetricResult, StreamMetric, TabularMetric
 
 import ast
@@ -178,7 +179,7 @@ class MeanGradientMagnitudeScale(StreamMetric):
         if metric_config is None or metric_config["sigmas"] is None:
             sigmas = (0.5, 1.0, 2.0)
         else :
-            sigmas = int(metric_config["sigmas"])
+            sigmas = metric_config["sigmas"]
         
         arr = datapoint[0]
         image_sitk = sitk.GetImageFromArray(arr)
@@ -207,25 +208,37 @@ class _TaskTransferFunction_tools():
     def compute_ttf_3d_fast(
         self,
         volume,
+        spacing,
         max_profiles=1000,
-        profile_half_length=10,
+        profile_half_length_mm=10.0,
+        step_mm=0.25,
         sampling_step=3,
     ):
         Z, Y, X = volume.shape
-
+        spacing = ast.literal_eval(spacing)
+        sx, sy, sz = spacing
         # --- 1. gradient
-        gz, gy, gx = np.gradient(volume)
+        gz, gy, gx = np.gradient(volume, sz, sy, sx)
         grad_mag = np.sqrt(gx**2 + gy**2 + gz**2)
 
         # --- 2. avoid flat zones
         threshold = np.percentile(grad_mag, 98)
 
         profiles = []
+        
+        sample_positions = np.arange(
+            -profile_half_length_mm,
+            profile_half_length_mm + step_mm,
+            step_mm
+            
+        )
+        
+        margin = int(np.ceil(profile_half_length_mm) / min(spacing))
 
         # --- 3.  undersampled browsing
-        for z in range(profile_half_length, Z - profile_half_length, sampling_step):
-            for y in range(profile_half_length, Y - profile_half_length, sampling_step):
-                for x in range(profile_half_length, X - profile_half_length, sampling_step):
+        for z in range(margin, Z - margin, sampling_step):
+            for y in range(margin, Y - margin, sampling_step):
+                for x in range(margin, X - margin, sampling_step):
 
                     if grad_mag[z, y, x] < threshold:
                         continue
@@ -233,29 +246,31 @@ class _TaskTransferFunction_tools():
                     direction = np.array([gz[z, y, x], gy[z, y, x], gx[z, y, x]])
                     norm = np.linalg.norm(direction)
 
-                    if norm < 1e-6:
+                    if norm < 1e-8:
                         continue
 
                     direction = direction / norm
 
                     profile = []
                     valid = True
-
-                    for t in range(-profile_half_length, profile_half_length + 1):
-                        pos = np.array([z, y, x]) + t * direction
-                        zi, yi, xi = np.round(pos).astype(int)
-
-                        if (
-                            0 <= zi < Z and
-                            0 <= yi < Y and
-                            0 <= xi < X
-                        ):
-                            profile.append(volume[zi, yi, xi])
-                        else:
-                            valid = False
+                    
+                    for d_mm in sample_positions:
+                        dz_mm = direction[0] * d_mm
+                        dy_mm = direction[1] * d_mm
+                        dx_mm = direction[2] * d_mm
+                        # get indices from mm
+                        zf = z + dz_mm / sz
+                        yf = y + dy_mm / sy
+                        xf = x + dx_mm / sx
+                        
+                        if (zf < 0 or zf >= Z-1 or yf < 0 or yf >= Y-1 or xf < 0 or xf >= X-1):
+                            profile = None
                             break
-
-                    if valid:
+                        
+                        val = map_coordinates(volume, [[zf],[yf],[xf]], order=1, mode="nearest")[0]
+                        profile.append(val)
+                        
+                    if profile is not None:
                         profiles.append(profile)
 
                     # stop early
@@ -271,7 +286,7 @@ class _TaskTransferFunction_tools():
 
         profiles = np.array(profiles)
 
-        # --- 4. alignment
+        # --- alignment
         aligned = []
         for p in profiles:
             g = np.gradient(p)
@@ -281,21 +296,27 @@ class _TaskTransferFunction_tools():
 
         aligned = np.array(aligned)
 
-        # --- 5. ESF (Edge Spread Function) : how an ideal border is smoothed by the scanner
+        # --- ESF (Edge Spread Function) : how an ideal border is smoothed by the scanner
         esf = np.mean(aligned, axis=0)
 
         # light smoothing
         esf = np.convolve(esf, np.ones(3)/3, mode='same')
 
-        # --- 6. LSF (Edge Spread Function)
-        lsf = np.gradient(esf)
+        # --- LSF (Edge Spread Function)
+        lsf = np.gradient(esf,step_mm)
 
-        # --- 7. FFT : transform into frequencies
+        # --- FFT : transform into frequencies
         ttf = np.abs(np.fft.fft(lsf))
         ttf /= np.max(ttf)
 
-        ttf = ttf[:len(ttf)//2]
-        freqs = np.arange(len(ttf)) / len(ttf)
+        freqs = np.fft.fftfreq(
+            len(lsf), 
+            d = step_mm
+        )
+        
+        keep = freqs > 0
+        freqs = freqs[keep]
+        ttf = ttf[keep]
 
         return ttf, freqs
 
@@ -323,9 +344,9 @@ class _TaskTransferFunction_tools():
         ttf_computed_val = interp_x(ttf_value)
         return ttf_computed_val
 
-class TaskTransferFunction50(_TaskTransferFunction_tools, StreamMetric):
+class ApproxTaskTransferFunction50(_TaskTransferFunction_tools, StreamMetric):
     """
-    Computes Task Transfer Function 50 of a CT Scan image (NIFTI format).
+    Computes anatomical approximation of Task Transfer Function 50 of a CT Scan image (NIFTI format), based on volume contouring.
     
     TTF50 and TTF10 are scalar metrics derived from the Task Transfer Function (TTF),
     which describes how well an imaging system preserves contrast at different
@@ -345,13 +366,17 @@ class TaskTransferFunction50(_TaskTransferFunction_tools, StreamMetric):
     def compute_ttf_3d_fast(
         self,
         volume,
+        spacing,
         max_profiles=1000,
         profile_half_length=10,
+        step_mm=0.25,
         sampling_step=3,
     ):
         return super().compute_ttf_3d_fast(volume,
+            spacing,
             max_profiles,
             profile_half_length,
+            step_mm,
             sampling_step,
         )
     
@@ -363,43 +388,62 @@ class TaskTransferFunction50(_TaskTransferFunction_tools, StreamMetric):
         """
         Requieres : 
         - base image in a tensor (datapoint[0])
+        In a dictionary "metric_config" :
+        - tuple img_spacing
         Optional :
         In a dictionary "metric_config" :
+        - tuple img_spacing
         - int max_profiles
         - int profile_half_length
         - int sampling_step
         
         Raises :
             ValueError : if "datapoint[0]" is not a torch.tensor
+            ValueError : if "img_spacing" is missing
         Args:
             datapoint : 
                 datapoint[0] : torch.tensor([img]) ; 
             reference : None.
-            metric_config (example): {'max_profiles' : 1000, 'profile_half_length':10, 'sampling_step':3}
+            metric_config (example): {'img_spacing':(0.66,0.66,1), 'max_profiles' : 1000, 'profile_half_length':10, 'sampling_step':3}
         """
         if not torch.is_tensor(datapoint[0]):
             raise ValueError("Data must be structured in a torch.tensor.")
         
-        if metric_config is None or metric_config["max_profiles"] is None:
+        if metric_config is None or "img_spacing" not in metric_config:
+            raise ValueError("Image spacing missing.")
+        else :
+            spacing = datapoint[2][str(metric_config["img_spacing"])]
+            
+        if metric_config is None or "step_mm" not in metric_config:
+            step_mm = 0.25
+        else :
+            step_mm = float(metric_config["step_mm"])
+        
+        if metric_config is None or "max_profiles" not in metric_config:
             max_profiles = 1000
         else :
             max_profiles = int(metric_config["max_profiles"])
             
-        if metric_config is None or metric_config["profile_half_length"] is None:
+        if metric_config is None or "profile_half_length" not in metric_config:
             profile_half_length = 10
         else :
             profile_half_length = int(metric_config["profile_half_length"])
             
-        if metric_config is None or metric_config["sampling_step"] is None:
+        if metric_config is None or "sampling_step" not in metric_config:
             sampling_step = 3
         else :
             sampling_step = int(metric_config["sampling_step"])
-              
+    
         arr = datapoint[0]
         
-        ttf, freqs = self.compute_ttf_3d_fast(arr, max_profiles=max_profiles,
-                                         profile_half_length=profile_half_length,
-                                         sampling_step=sampling_step)
+        ttf, freqs = self.compute_ttf_3d_fast(arr, 
+                                        spacing=spacing, 
+                                        max_profiles=max_profiles,
+                                        profile_half_length=profile_half_length,
+                                        step_mm=step_mm,
+                                        sampling_step=sampling_step)
+        
+
         ttf50 = self.compute_ttf_metrics_interp(ttf, freqs,0.5)
         return ttf50
 
@@ -413,9 +457,9 @@ class TaskTransferFunction50(_TaskTransferFunction_tools, StreamMetric):
         )
         return res
 
-class TaskTransferFunction10(_TaskTransferFunction_tools, StreamMetric):
+class ApproxTaskTransferFunction10(_TaskTransferFunction_tools, StreamMetric):
     """
-    Computes Task Transfer Function 10 of a CT Scan image (NIFTI format).
+    Computes anatomical approximation of Task Transfer Function 10 of a CT Scan image (NIFTI format), based on volume contouring.
     
     TTF50 and TTF10 are scalar metrics derived from the Task Transfer Function (TTF),
     which describes how well an imaging system preserves contrast at different
@@ -435,13 +479,17 @@ class TaskTransferFunction10(_TaskTransferFunction_tools, StreamMetric):
     def compute_ttf_3d_fast(
         self,
         volume,
+        spacing,
         max_profiles=1000,
         profile_half_length=10,
+        step_mm=0.25,
         sampling_step=3,
     ):
         return super().compute_ttf_3d_fast(volume,
+            spacing,
             max_profiles,
             profile_half_length,
+            step_mm,
             sampling_step,
         )
     
@@ -453,6 +501,9 @@ class TaskTransferFunction10(_TaskTransferFunction_tools, StreamMetric):
         """
         Requieres : 
         - base image in a tensor (datapoint[0])
+        In a dictionary "metric_config" :
+        - tuple img_spacing
+        
         Optional :
         In a dictionary "metric_config" :
         - int max_profiles
@@ -465,31 +516,45 @@ class TaskTransferFunction10(_TaskTransferFunction_tools, StreamMetric):
             datapoint : 
                 datapoint[0] : torch.tensor([img]) ; 
             reference : None.
-            metric_config (example): {'max_profiles' : 1000, 'profile_half_length':10, 'sampling_step':3}
+            metric_config (example): {'img_spacing':(0.66,0.66,1), 'max_profiles' : 1000, 'profile_half_length':10, 'sampling_step':3}
         """
         if not torch.is_tensor(datapoint[0]):
             raise ValueError("Data must be structured in a torch.tensor.")
+        if metric_config is None or metric_config["img_spacing"] is None:
+            raise ValueError("Image spacing missing.")
+        else:
+            spacing = datapoint[2][str(metric_config["img_spacing"])]
         
-        if metric_config is None or metric_config["max_profiles"] is None:
+        if metric_config is None or "step_mm" not in metric_config:
+            step_mm = 0.25
+        else :
+            step_mm = float(metric_config["step_mm"])
+            
+        if metric_config is None or "max_profiles" not in metric_config:
             max_profiles = 1000
         else :
             max_profiles = int(metric_config["max_profiles"])
             
-        if metric_config is None or metric_config["profile_half_length"] is None:
+        if metric_config is None or "profile_half_length" not in metric_config:
             profile_half_length = 10
         else :
             profile_half_length = int(metric_config["profile_half_length"])
             
-        if metric_config is None or metric_config["sampling_step"] is None:
+        if metric_config is None or "sampling_step" not in metric_config:
             sampling_step = 3
         else :
             sampling_step = int(metric_config["sampling_step"])
             
         arr = datapoint[0]
         
-        ttf, freqs = self.compute_ttf_3d_fast(arr, max_profiles=max_profiles,
-                                         profile_half_length=profile_half_length,
-                                         sampling_step=sampling_step)
+        ttf, freqs = self.compute_ttf_3d_fast(arr, 
+                                        spacing=spacing, 
+                                        max_profiles=max_profiles,
+                                        profile_half_length=profile_half_length,
+                                        step_mm=step_mm,
+                                        sampling_step=sampling_step)
+        
+
         ttf10 = self.compute_ttf_metrics_interp(ttf, freqs,0.1)
         return ttf10
 
@@ -503,7 +568,7 @@ class TaskTransferFunction10(_TaskTransferFunction_tools, StreamMetric):
         )
         return res
     
-class _NoisePowerSpectrum3D_tools():
+class _NoisePowerSpectrum_avg3D_tools():
     
     def _get_nps_2d(self, arr, patch_size, stride, keep_fraction, apply_window):
         H, W = arr.shape
@@ -561,7 +626,7 @@ class _NoisePowerSpectrum3D_tools():
         
         return nps_2d_mean
         
-    def get_nps_1d_freq(self, arr, patch_size, stride, keep_fraction, apply_window):
+    def get_nps_1d_freq(self, arr, spacing_xy, patch_size, stride, keep_fraction, apply_window):
 
         if arr.ndim == 3:
             slices_tmp = arr
@@ -571,6 +636,8 @@ class _NoisePowerSpectrum3D_tools():
         
         slice_indices = np.linspace(0, slices_tmp.shape[0]-1, 10, dtype=int)
         slices = slices_tmp[slice_indices]
+        
+        sx, sy = spacing_xy
 
         nps_list_all = []
 
@@ -580,23 +647,28 @@ class _NoisePowerSpectrum3D_tools():
 
         nps_2d_mean = np.mean(nps_list_all, axis=0)
 
-        # --- 4. Radial averaging
-        y, x = np.indices(nps_2d_mean.shape)
-        center = np.array(nps_2d_mean.shape) // 2
-        r = np.sqrt((x - center[1])**2 + (y - center[0])**2)
-        r = r.astype(np.int32)
-
-        tbin = np.bincount(r.ravel(), nps_2d_mean.ravel())
-        nr = np.bincount(r.ravel())
+        # Radial averaging
+        
+        fx = np.fft.fftfreq(patch_size, d=sx)
+        fy = np.fft.fftfreq(patch_size, d=sy)
+        FX, FY = np.meshgrid(np.fft.fftshift(fx),np.fft.fftshift(fy))
+        r = np.sqrt(FX**2 + FY**2)
+        
+        freq_bin = min(abs(fx[1] - fx[0]), abs(fy[1] - fy[0]))
+        r_bin = np.round(r / freq_bin).astype(np.int32)
+        
+        tbin = np.bincount(r_bin.ravel(), weights = nps_2d_mean.ravel())
+        nr = np.bincount(r_bin.ravel())
 
         nps_1d = tbin / np.maximum(nr, 1)
-        freqs = np.arange(len(nps_1d)) / patch_size
+        freqs = np.arange(len(nps_1d)) / freq_bin
         
         return nps_1d, freqs
 
-class TotalPower_NoisePowerSpectrum3D(StreamMetric, _NoisePowerSpectrum3D_tools):
+class TotalPower_NoisePowerSpectrum_avg3D(StreamMetric, _NoisePowerSpectrum_avg3D_tools):
     """
     Computes Total power of Noise Power Spectrum of a CT Scan image (NIFTI format).
+    We use the mean value of 10 slices to approximate 3D.
     
     The NPS describes how noise is distributed across spatial frequencies,
     providing both the magnitude and texture of noise.
@@ -619,8 +691,8 @@ class TotalPower_NoisePowerSpectrum3D(StreamMetric, _NoisePowerSpectrum3D_tools)
         
     """
     
-    def get_nps_1d_freq(self, arr, patch_size, stride, keep_fraction, apply_window):
-        return super().get_nps_1d_freq(arr, patch_size, stride, keep_fraction, apply_window)
+    def get_nps_1d_freq(self, arr, xy_spacing, patch_size, stride, keep_fraction, apply_window):
+        return super().get_nps_1d_freq(arr, xy_spacing, patch_size, stride, keep_fraction, apply_window)
 
     def aggregate(self, datapoint, reference=None, metric_config=None):
         """
@@ -628,6 +700,7 @@ class TotalPower_NoisePowerSpectrum3D(StreamMetric, _NoisePowerSpectrum3D_tools)
         - base image in a tensor (datapoint[0])
         Optional :
         In a dictionary "metric_config" :
+        - tuple img_spacing
         - int patch_size
         - int stride
         - float keep_fraction
@@ -639,36 +712,41 @@ class TotalPower_NoisePowerSpectrum3D(StreamMetric, _NoisePowerSpectrum3D_tools)
             datapoint : 
                 datapoint[0] : torch.tensor([array_img]) ; 
             reference : None.
-            metric_config (example): {'patch_size' : 32, 'stride':16, 'keep_fraction':0.1, 'apply_window':True }
+            metric_config (example): {'img_spacing':(0.66,0.66,1), 'patch_size' : 32, 'stride':16, 'keep_fraction':0.1, 'apply_window':True }
             
         """
         if not torch.is_tensor(datapoint[0]):
             raise ValueError("Data must be structured in a torch.tensor.")
         
-        if metric_config is None or metric_config["patch_size"] is None:
+        if metric_config is None or metric_config["img_spacing"] is None:
+            raise ValueError("Image spacing missing.")
+        else:
+            str_spacing = datapoint[2][str(metric_config["img_spacing"])]
+            xy_spacing = ast.literal_eval(str_spacing)[:2]
+            
+        if metric_config is None or "patch_size" not in metric_config:
             patch_size = 32
         else :
             patch_size = int(metric_config["patch_size"])
             
-        if metric_config is None or metric_config["stride"] is None:
+        if metric_config is None or "stride" not in metric_config:
             stride = 16
         else :
             stride = int(metric_config["stride"])
             
-        if metric_config is None or metric_config["keep_fraction"] is None:
+        if metric_config is None or "keep_fraction" not in metric_config:
             keep_fraction = 0.1
         else :
             keep_fraction = float(metric_config["keep_fraction"])
             
-        if metric_config is None or metric_config["apply_window"] is None:
+        if metric_config is None or "apply_window" not in metric_config:
             apply_window = True
         else :
             apply_window = bool(metric_config["apply_window"])
             
         
-        arr = datapoint[0]
-        
-        nps_1d, freqs = self.get_nps_1d_freq(arr, patch_size, stride, keep_fraction, apply_window)
+        arr = datapoint[0]        
+        nps_1d, freqs = self.get_nps_1d_freq(arr, xy_spacing, patch_size, stride, keep_fraction, apply_window)
 
         # --- Metrics
         total_power = float(np.sum(nps_1d))
@@ -709,9 +787,10 @@ class TotalPower_NoisePowerSpectrum3D(StreamMetric, _NoisePowerSpectrum3D_tools)
         )
         return res
     
-class Entropy_NoisePowerSpectrum3D(StreamMetric, _NoisePowerSpectrum3D_tools):
+class Entropy_NoisePowerSpectrum_avg3D(StreamMetric, _NoisePowerSpectrum_avg3D_tools):
     """
     Computes the entropy of Noise Power Spectrum of a CT Scan image (NIFTI format).
+    We use the mean value of 10 slices to approximate 3D.
     
     The NPS describes how noise is distributed across spatial frequencies,
     providing both the magnitude and texture of noise.
@@ -734,8 +813,8 @@ class Entropy_NoisePowerSpectrum3D(StreamMetric, _NoisePowerSpectrum3D_tools):
         
     """
     
-    def get_nps_1d_freq(self, arr, patch_size, stride, keep_fraction, apply_window):
-        return super().get_nps_1d_freq(arr, patch_size, stride, keep_fraction, apply_window)
+    def get_nps_1d_freq(self, arr, xy_spacing, patch_size, stride, keep_fraction, apply_window):
+        return super().get_nps_1d_freq(arr, xy_spacing, patch_size, stride, keep_fraction, apply_window)
 
     def aggregate(self, datapoint, reference=None, metric_config=None):
         """
@@ -743,6 +822,7 @@ class Entropy_NoisePowerSpectrum3D(StreamMetric, _NoisePowerSpectrum3D_tools):
         - base image in a tensor (datapoint[0])
         Optional :
         In a dictionary "metric_config" :
+        - tuple img_spacing
         - int patch_size
         - int stride
         - float keep_fraction
@@ -754,28 +834,34 @@ class Entropy_NoisePowerSpectrum3D(StreamMetric, _NoisePowerSpectrum3D_tools):
             datapoint : 
                 datapoint[0] : torch.tensor([array_img]) ; 
             reference : None.
-            metric_config (example): {'patch_size' : 32, 'stride':16, 'keep_fraction':0.1, 'apply_window':True }
+            metric_config (example): {'img_spacing':(0.66,0.66,1), 'patch_size' : 32, 'stride':16, 'keep_fraction':0.1, 'apply_window':True }
             
         """
         if not torch.is_tensor(datapoint[0]):
             raise ValueError("Data must be structured in a torch.tensor.")
         
-        if metric_config is None or metric_config["patch_size"] is None:
+        if metric_config is None or metric_config["img_spacing"] is None:
+            raise ValueError("Image spacing missing.")
+        else:
+            str_spacing = datapoint[2][str(metric_config["img_spacing"])]
+            xy_spacing = ast.literal_eval(str_spacing)[:2]
+        
+        if metric_config is None or "patch_size" not in metric_config:
             patch_size = 32
         else :
             patch_size = int(metric_config["patch_size"])
             
-        if metric_config is None or metric_config["stride"] is None:
+        if metric_config is None or "stride" not in metric_config:
             stride = 16
         else :
             stride = int(metric_config["stride"])
             
-        if metric_config is None or metric_config["keep_fraction"] is None:
+        if metric_config is None or "keep_fraction" not in metric_config:
             keep_fraction = 0.1
         else :
             keep_fraction = float(metric_config["keep_fraction"])
             
-        if metric_config is None or metric_config["apply_window"] is None:
+        if metric_config is None or "apply_window" not in metric_config:
             apply_window = True
         else :
             apply_window = bool(metric_config["apply_window"])
@@ -783,7 +869,7 @@ class Entropy_NoisePowerSpectrum3D(StreamMetric, _NoisePowerSpectrum3D_tools):
         
         arr = datapoint[0]
 
-        nps_1d, freqs = self.get_nps_1d_freq(arr, patch_size, stride, keep_fraction, apply_window)
+        nps_1d, freqs = self.get_nps_1d_freq(arr, xy_spacing, patch_size, stride, keep_fraction, apply_window)
         
         p = nps_1d / np.sum(nps_1d)
         p = p[p > 0]
@@ -834,8 +920,8 @@ class DICESimilarityCoefficient(StreamMetric):
             raise ValueError("Data must be structured in a torch.tensor.")
         if len(datapoint[1]) != 2 :
             raise ValueError("Tensor must contains : segmentation 1 (array), segmentation 2 (array)")
-        if metric_config["seg1_origin"] is None or metric_config["seg1_spacing"] is None or metric_config["seg1_direction"] is None or \
-           metric_config["seg2_origin"] is None or metric_config["seg2_spacing"] is None or metric_config["seg2_direction"] is None :
+        if "seg1_origin" not in metric_config or "seg1_spacing" not in metric_config or "seg1_direction" not in metric_config  or \
+            "seg2_origin" not in metric_config or "seg2_spacing" not in metric_config or "seg2_direction" not in metric_config :
             raise ValueError("metric_config must include the following keys : ['seg1_origin','seg1_spacing','seg1_direction','seg2_origin','seg2_spacing','seg2_direction'].")
         
         overlap = sitk.LabelOverlapMeasuresImageFilter()
@@ -899,8 +985,8 @@ class IntersectionOverUnion(StreamMetric):
             raise ValueError("Data must be structured in a torch.tensor.")
         if len(datapoint[1]) != 2 :
             raise ValueError("Tensor must contains : segmentation 1 (array), segmentation 2 (array)")
-        if metric_config["seg1_origin"] is None or metric_config["seg1_spacing"] is None or metric_config["seg1_direction"] is None or \
-           metric_config["seg2_origin"] is None or metric_config["seg2_spacing"] is None or metric_config["seg2_direction"] is None :
+        if "seg1_origin" not in metric_config or "seg1_spacing" not in metric_config or "seg1_direction" not in metric_config  or \
+            "seg2_origin" not in metric_config or "seg2_spacing" not in metric_config or "seg2_direction" not in metric_config :
             raise ValueError("metric_config must include the following keys : ['seg1_origin','seg1_spacing','seg1_direction','seg2_origin','seg2_spacing','seg2_direction'].")
         
         overlap = sitk.LabelOverlapMeasuresImageFilter()
@@ -934,46 +1020,15 @@ class _HausdorffDistance_tools():
     """
     Toolkit for HausdorffDistance classes
     """
-    def _mask_to_surface_indices(self, mask_np):
-        """
-        Gives only surface mask from complete mask.
-        Args:
-            mask_np (np.Array): input mask, binary (z,y,x) array
-
-        Returns:
-            np.Array : indices in array index order (z,y,x)
-        """
-        eroded = binary_erosion(mask_np)
-        surface = mask_np & (~eroded)
-        inds = np.argwhere(surface)
-        return inds
-
-    def _indices_to_physical_points(self, img, inds):
-        """
-        Gives physical points (in mm) from indices in 3D sitk image
-        Args:
-            img (sitk Image): Segmentation image
-            inds (np.Array): array Nx3 of (z,y,x), indices of surface voxels
-
-        Returns:
-            np.Array : shape (N,3) in mm (physical)
-        """
-
-        pts = [
-            img.TransformIndexToPhysicalPoint((int(i[2]), int(i[1]), int(i[0])))
-            for i in inds
-        ]
-        return np.array(pts)
-
 
     def _get_distances(self, seg1, seg2):
 
         # Distance maps (IMPORTANT: useImageSpacing=True → mm)
         seg1_dist = sitk.SignedMaurerDistanceMap(
-            seg1, squaredDistance=False, useImageSpacing=True
+            seg1, squaredDistance=False, useImageSpacing=True, insideIsPositive=False
         )
         seg2_dist = sitk.SignedMaurerDistanceMap(
-            seg2, squaredDistance=False, useImageSpacing=True
+            seg2, squaredDistance=False, useImageSpacing=True, insideIsPositive=False
         )
 
         # Surfaces (beaucoup plus robuste que ton extraction maison)
@@ -999,29 +1054,6 @@ class HausdorffDistance(_HausdorffDistance_tools,StreamMetric):
     Needs to have two segmentation files in NIFTI format.
     In the dataset : segmentations are loaded with sitk.GetArrayFromImage(sitk.ReadImage(segmentation_path)).
     """
-
-    def _mask_to_surface_indices(self, mask_np):
-        """
-        Gives only surface mask from complete mask.
-        Args:
-            mask_np (np.Array): input mask, binary (z,y,x) array
-
-        Returns:
-            np.Array : indices in array index order (z,y,x)
-        """
-        return super()._mask_to_surface_indices(mask_np)
-
-    def _indices_to_physical_points(self, img, inds):
-        """
-        Gives physical points (in mm) from indices in 3D sitk image
-        Args:
-            img (sitk Image): Segmentation image
-            inds (np.Array): array Nx3 of (z,y,x), indices of surface voxels
-
-        Returns:
-            np.Array : shape (N,3) in mm (physical)
-        """
-        return super()._indices_to_physical_points(img, inds)
 
     def _get_distances(self, seg1, seg2):
         """
@@ -1050,7 +1082,10 @@ class HausdorffDistance(_HausdorffDistance_tools,StreamMetric):
             float: Hausdorff Distance
         """
         dists_seg2_to_seg1, dists_seg1_to_seg2 = self._get_distances(seg1, seg2)
-        hd_max = max(dists_seg2_to_seg1.max(), dists_seg1_to_seg2.max())
+        if len(dists_seg2_to_seg1) == 0 or len(dists_seg2_to_seg1) == 0 :
+            raise ValueError("Error during computing : as least one segmentation is empty.")
+        else:
+            hd_max = max(dists_seg2_to_seg1.max(), dists_seg1_to_seg2.max())
 
         return hd_max
 
@@ -1080,8 +1115,8 @@ class HausdorffDistance(_HausdorffDistance_tools,StreamMetric):
             raise ValueError("Data must be structured in a torch.tensor.")
         if len(datapoint[1]) != 2 :
             raise ValueError("Tensor must contains : segmentation 1 (array), segmentation 2 (array)")
-        if metric_config["seg1_origin"] is None or metric_config["seg1_spacing"] is None or metric_config["seg1_direction"] is None or \
-           metric_config["seg2_origin"] is None or metric_config["seg2_spacing"] is None or metric_config["seg2_direction"] is None :
+        if "seg1_origin" not in metric_config or "seg1_spacing" not in metric_config or "seg1_direction" not in metric_config  or \
+            "seg2_origin" not in metric_config or "seg2_spacing" not in metric_config or "seg2_direction" not in metric_config :
             raise ValueError("metric_config must include the following keys : ['seg1_origin','seg1_spacing','seg1_direction','seg2_origin','seg2_spacing','seg2_direction'].")
         
         seg1_img = sitk.GetImageFromArray(datapoint[1][0])
@@ -1116,29 +1151,6 @@ class HausdorffDistance95(_HausdorffDistance_tools, StreamMetric):
     In the dataset : segmentations are loaded with sitk.GetArrayFromImage(sitk.ReadImage(segmentation_path)).
     """
 
-    def _mask_to_surface_indices(self, mask_np):
-        """
-        Gives only surface mask from complete mask.
-        Args:
-            mask_np (np.Array): input mask, binary (z,y,x) array
-
-        Returns:
-            np.Array : indices in array index order (z,y,x)
-        """
-        return super()._mask_to_surface_indices(mask_np)
-
-    def _indices_to_physical_points(self, img, inds):
-        """
-        Gives physical points (in mm) from indices in 3D sitk image
-        Args:
-            img (sitk Image): Segmentation image
-            inds (np.Array): array Nx3 of (z,y,x), indices of surface voxels
-
-        Returns:
-            np.Array : shape (N,3) in mm (physical)
-        """
-        return super()._indices_to_physical_points(img, inds)
-
     def _get_distances(self, seg1, seg2):
         """
         Gives distances between two segmentations, in mm
@@ -1168,9 +1180,11 @@ class HausdorffDistance95(_HausdorffDistance_tools, StreamMetric):
         """
 
         dists_seg2_to_seg1, dists_seg1_to_seg2 = self._get_distances(seg1, seg2)
-
-        # Hausdorff symmetric
-        hd95 = max(np.percentile(dists_seg2_to_seg1, 95), np.percentile(dists_seg1_to_seg2, 95))
+        if len(dists_seg2_to_seg1) == 0 or len(dists_seg2_to_seg1) == 0 :
+            # Hausdorff symmetric
+            raise ValueError("Error during computing : as least one segmentation is empty.")
+        else:
+            hd95 = max(np.percentile(dists_seg2_to_seg1, 95), np.percentile(dists_seg1_to_seg2, 95))
         
         return hd95
             
@@ -1200,8 +1214,8 @@ class HausdorffDistance95(_HausdorffDistance_tools, StreamMetric):
             raise ValueError("Data must be structured in a torch.tensor.")
         if len(datapoint[1]) != 2 :
             raise ValueError("Tensor must contains : segmentation 1 (array), segmentation 2 (array)")
-        if metric_config["seg1_origin"] is None or metric_config["seg1_spacing"] is None or metric_config["seg1_direction"] is None or \
-           metric_config["seg2_origin"] is None or metric_config["seg2_spacing"] is None or metric_config["seg2_direction"] is None :
+        if "seg1_origin" not in metric_config or "seg1_spacing" not in metric_config or "seg1_direction" not in metric_config  or \
+            "seg2_origin" not in metric_config or "seg2_spacing" not in metric_config or "seg2_direction" not in metric_config :
             raise ValueError("metric_config must include the following keys : ['seg1_origin','seg1_spacing','seg1_direction','seg2_origin','seg2_spacing','seg2_direction'].")
         
         seg1_img = sitk.GetImageFromArray(datapoint[1][0])
