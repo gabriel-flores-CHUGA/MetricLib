@@ -103,7 +103,7 @@ class ImageEntropy3D(StreamMetric):
     
     def aggregate(self, datapoint, reference=None, metric_config=None):
         """
-        Requieres : 
+        Requirement : 
         - source image in a tensor (datapoint[0])
         Optional :
         - number of bins for entropy approximation (in metric_config["bins"])(default : 256)
@@ -160,7 +160,7 @@ class MeanGradientMagnitudeScale(StreamMetric):
     
     def aggregate(self, datapoint, reference=None, metric_config=None):
         """
-        Requieres : 
+        Requirement : 
         - source image in a tensor (datapoint[0])
         Optional :
         - tuples of sigmas values for smoothing (in metric_config["sigmas"])(default : (0.5, 1.0, 2.0))
@@ -386,7 +386,7 @@ class ApproxTaskTransferFunction50(_TaskTransferFunction_tools, StreamMetric):
     
     def aggregate(self, datapoint, reference=None, metric_config=None):
         """
-        Requieres : 
+        Requirement : 
         - base image in a tensor (datapoint[0])
         In a dictionary "metric_config" :
         - tuple img_spacing
@@ -499,7 +499,7 @@ class ApproxTaskTransferFunction10(_TaskTransferFunction_tools, StreamMetric):
     
     def aggregate(self, datapoint, reference=None, metric_config=None):
         """
-        Requieres : 
+        Requirement : 
         - base image in a tensor (datapoint[0])
         In a dictionary "metric_config" :
         - tuple img_spacing
@@ -696,7 +696,7 @@ class TotalPower_NoisePowerSpectrum_avg3D(StreamMetric, _NoisePowerSpectrum_avg3
 
     def aggregate(self, datapoint, reference=None, metric_config=None):
         """
-        Requieres : 
+        Requirement : 
         - base image in a tensor (datapoint[0])
         Optional :
         In a dictionary "metric_config" :
@@ -751,30 +751,6 @@ class TotalPower_NoisePowerSpectrum_avg3D(StreamMetric, _NoisePowerSpectrum_avg3
         # --- Metrics
         total_power = float(np.sum(nps_1d))
 
-        ### Possibility to add more metrics : 
-        # # Mean frequency (center of mass of spectrum)
-        # mean_freq = float(np.sum(freqs * nps_1d) / np.sum(nps_1d))
-
-        # # Peak frequency
-        # peak_freq = float(freqs[np.argmax(nps_1d)])
-
-        # # --- Classification (simple rule)
-        # # empirical value
-        # if mean_freq < 0.15:
-        #     noise_type = "low_frequency"   # smoothed noise / IR
-        # else:
-        #     noise_type = "high_frequency"  # grainy noise / FBP
-
-        # metrics = {
-        #     "num_total_patches": len(patches),
-        #     "num_selected_patches": len(selected_patches),
-        #     "total_power": total_power,
-        #     "mean_frequency": mean_freq,
-        #     "peak_frequency": peak_freq,
-        #     "noise_type": noise_type,
-        #     "mean_score_selected": float(np.mean(scores[idx])),
-        # }
-
         return total_power
 
 
@@ -818,7 +794,7 @@ class Entropy_NoisePowerSpectrum_avg3D(StreamMetric, _NoisePowerSpectrum_avg3D_t
 
     def aggregate(self, datapoint, reference=None, metric_config=None):
         """
-        Requieres : 
+        Requirement : 
         - base image in a tensor (datapoint[0])
         Optional :
         In a dictionary "metric_config" :
@@ -896,10 +872,10 @@ class DICESimilarityCoefficient(StreamMetric):
 
     def aggregate(self, datapoint, reference=None, metric_config=None):
         """
-        Requieres : 
+        Requirement : 
         - segmentations images in a tensor (datapoint[1])
         - metric_config to have ['seg1_origin','seg1_spacing','seg1_direction','seg2_origin','seg2_spacing','seg2_direction'] keys.
-        This keys are used to map the requiered information about segmentations to the right columns in the metadata file. 
+        This keys are used to map the required information about segmentations to the right columns in the metadata file. 
         Therefore, we need specific information about images in the metadata file. It is accessible with simpleITK : 
             img_seg1 = sitk.ReadImage(seg1_path)
             seg1_origin = img_seg1.GetOrigin()
@@ -961,10 +937,10 @@ class IntersectionOverUnion(StreamMetric):
 
     def aggregate(self, datapoint, reference=None, metric_config=None):
         """
-        Requieres : 
+        Requirement : 
         - segmentations images in a tensor (datapoint[1])
         - metric_config to have ['seg1_origin','seg1_spacing','seg1_direction','seg2_origin','seg2_spacing','seg2_direction'] keys.
-        This keys are used to map the requiered information about segmentations to the right columns in the metadata file. 
+        This keys are used to map the required information about segmentations to the right columns in the metadata file. 
         Therefore, we need specific information about images in the metadata file. It is accessible with simpleITK : 
             img_seg1 = sitk.ReadImage(seg1_path)
             seg1_origin = img_seg1.GetOrigin()
@@ -1091,10 +1067,10 @@ class HausdorffDistance(_HausdorffDistance_tools,StreamMetric):
 
     def aggregate(self, datapoint, reference=None, metric_config=None):
         """
-        Requieres : 
+        Requirement : 
         - segmentations images in a tensor (datapoint[1])
         - metric_config to have ['seg1_origin','seg1_spacing','seg1_direction','seg2_origin','seg2_spacing','seg2_direction'] keys.
-        This keys are used to map the requiered information about segmentations to the right columns in the metadata file. 
+        This keys are used to map the required information about segmentations to the right columns in the metadata file. 
         Therefore, we need specific information about images in the metadata file. It is accessible with simpleITK : 
             img_seg1 = sitk.ReadImage(seg1_path)
             seg1_origin = img_seg1.GetOrigin()
@@ -1190,10 +1166,10 @@ class HausdorffDistance95(_HausdorffDistance_tools, StreamMetric):
             
     def aggregate(self, datapoint, reference=None, metric_config=None):
         """
-        Requieres : 
+        Requirement : 
         - segmentations images in a tensor (datapoint[1])
         - metric_config to have ['seg1_origin','seg1_spacing','seg1_direction','seg2_origin','seg2_spacing','seg2_direction'] keys.
-        This keys are used to map the requiered information about segmentations to the right columns in the metadata file. 
+        This keys are used to map the required information about segmentations to the right columns in the metadata file. 
         Therefore, we need specific information about images in the metadata file. It is accessible with simpleITK : 
             img_seg1 = sitk.ReadImage(seg1_path)
             seg1_origin = img_seg1.GetOrigin()
