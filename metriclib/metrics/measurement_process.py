@@ -1114,7 +1114,8 @@ class HausdorffDistance(_HausdorffDistance_tools,StreamMetric):
     def compute(self, data, reference, metric_config):
         res = MetricResult(
             cluster="Measurement Process",
-            threshold=5,
+            threshold=5.0,
+            threshold_type="max",
             description="maximum Hausdorff Distance between two segmentations",
             value=data,
         )
@@ -1213,8 +1214,9 @@ class HausdorffDistance95(_HausdorffDistance_tools, StreamMetric):
     def compute(self, data, reference, metric_config):
         res = MetricResult(
             cluster="Measurement Process",
-            threshold=1,
-            description="Hausdorff Distance 95% \between two segmentations",
+            threshold=1.0,
+            threshold_type="max",
+            description="Hausdorff Distance 95% between two segmentations",
             value=data,
         )
         return res
